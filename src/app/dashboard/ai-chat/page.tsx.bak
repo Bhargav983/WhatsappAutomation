@@ -1,0 +1,1265 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+    Bot,
+    CheckCircle2,
+    Clock3,
+    Hand,
+    Plus,
+    RefreshCw,
+    Save,
+    Sparkles,
+    UserRoundCheck,
+    UserPlus,
+    Search,
+    Trash2,
+    Phone,
+    MessageSquare,
+    Edit2,
+    ExternalLink,
+    ClipboardList,
+    Send
+} from "lucide-react";
+import { useSession as useSessionProvider } from "@/components/dashboard/session-provider";
+import { SessionGuard } from "@/components/dashboard/session-guard";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useSocket } from "@/components/chat/socket-context";
+import { toast } from "sonner";
+import Link from "next/link";
+
+interface AllowedContact {
+    jid: string;
+    name?: string | null;
+    notify?: string | null;
+    profilePic?: string | null;
+    phone: string;
+    category?: string | null;
+    relationship?: string | null;
+    addressAs?: string | null;
+    tone?: string | null;
+}
+
+interface AiConfig {
+    enabled: boolean;
+    audienceMode: "SPECIFIC" | "ALL_PRIVATE";
+    allowedJids: string[];
+    businessPrompt: string;
+    handoffMessage: string;
+}
+
+interface AiConversation {
+    id: string;
+    remoteJid: string;
+    status: "ACTIVE" | "COMPLETED" | "NEEDS_HUMAN" | "MANUAL";
+    requirementDetails?: string | null;
+    notes?: string | null;
+    preferredMeetingTime?: string | null;
+    summary?: string | null;
+    updatedAt: string;
+    lastUserMessageAt?: string | null;
+    lastAiReplyAt?: string | null;
+    contact?: {
+        name?: string | null;
+        notify?: string | null;
+        profilePic?: string | null;
+    } | null;
+}
+
+type RequirementStatus = "NEW" | "IN_PROGRESS" | "DONE" | "ON_HOLD" | "NEEDS_CLARIFICATION";
+
+interface AiRequirement {
+    id: string;
+    remoteJid: string;
+    title: string;
+    description: string;
+    status: RequirementStatus;
+    internalNotes?: string | null;
+    lastStatusNotifiedAt?: string | null;
+    updatedAt: string;
+    contact?: {
+        name?: string | null;
+        notify?: string | null;
+        profilePic?: string | null;
+    } | null;
+}
+
+interface PendingRequirementUpdate {
+    requirement: AiRequirement;
+    status: RequirementStatus;
+    message: string;
+}
+
+interface ContactSearchResult {
+    id: string;
+    jid: string;
+    name?: string | null;
+    notify?: string | null;
+    profilePic?: string | null;
+    remoteJidAlt?: string | null;
+}
+
+const DEFAULT_PROMPT = "You are a WhatsApp intake assistant for collecting project requirements. Greet the customer, ask for their requirements, acknowledge each requirement, ask if they have any other requirements, and when they say no, close politely. Store every concrete requirement in requirementDetails. If the customer asks for a meeting, ask for their preferred meeting time. Do not ask for budget details. Ask one short question at a time.";
+const DEFAULT_HANDOFF = "Thanks, we will come back to you on this.";
+
+function statusBadge(status: AiConversation["status"]) {
+    const variants: Record<AiConversation["status"], string> = {
+        ACTIVE: "bg-blue-500/10 text-blue-700 border-blue-500/20",
+        COMPLETED: "bg-emerald-500/10 text-emerald-700 border-emerald-500/20",
+        NEEDS_HUMAN: "bg-amber-500/10 text-amber-700 border-amber-500/20",
+        MANUAL: "bg-slate-500/10 text-slate-700 border-slate-500/20",
+    };
+
+    return <Badge variant="outline" className={variants[status]}>{status.replace("_", " ")}</Badge>;
+}
+
+
+const requirementStatusOptions: Array<{ value: RequirementStatus; label: string }> = [
+    { value: "NEW", label: "New" },
+    { value: "IN_PROGRESS", label: "In Progress" },
+    { value: "DONE", label: "Done" },
+    { value: "ON_HOLD", label: "On Hold" },
+    { value: "NEEDS_CLARIFICATION", label: "Needs Clarification" },
+];
+
+function requirementStatusLabel(status: RequirementStatus) {
+    return requirementStatusOptions.find(item => item.value === status)?.label || status;
+}
+
+function requirementStatusBadge(status: RequirementStatus) {
+    const variants: Record<RequirementStatus, string> = {
+        NEW: "bg-slate-500/10 text-slate-700 border-slate-500/20",
+        IN_PROGRESS: "bg-blue-500/10 text-blue-700 border-blue-500/20",
+        DONE: "bg-emerald-500/10 text-emerald-700 border-emerald-500/20",
+        ON_HOLD: "bg-amber-500/10 text-amber-700 border-amber-500/20",
+        NEEDS_CLARIFICATION: "bg-purple-500/10 text-purple-700 border-purple-500/20",
+    };
+    return <Badge variant="outline" className={variants[status]}>{requirementStatusLabel(status)}</Badge>;
+}
+
+function buildRequirementStatusMessage(status: RequirementStatus, description: string) {
+    const clean = description.replace(/\s+/g, " ").trim();
+    const shortRequirement = clean.length > 120 ? `${clean.slice(0, 117)}...` : clean;
+    if (status === "NEW") return `Thanks, we have received your requirement and will review it: “${shortRequirement}”.`;
+    if (status === "IN_PROGRESS") return `We have started working on your requirement: “${shortRequirement}”.`;
+    if (status === "DONE") return `Your requirement has been completed: “${shortRequirement}”. Please check and let us know if anything else is needed.`;
+    if (status === "ON_HOLD") return `Your requirement is currently on hold: “${shortRequirement}”. We will update you once work resumes.`;
+    return `We need a little more detail for your requirement: “${shortRequirement}”. Could you please clarify?`;
+}
+
+function displayName(conversation: AiConversation) {
+    return conversation.contact?.name || conversation.contact?.notify || formatPhoneNumber(conversation.remoteJid);
+}
+
+function formatPhoneNumber(raw: string) {
+    const digits = raw.split("@")[0].replace(/\D/g, "");
+    if (!digits) return raw;
+    if (digits.length === 12 && digits.startsWith("91")) {
+        return `+91 ${digits.slice(2, 7)} ${digits.slice(7)}`;
+    }
+    return `+${digits}`;
+}
+
+function formatJid(raw: string) {
+    const trimmed = raw.trim();
+    if (!trimmed) return "";
+    if (trimmed.includes("@")) return trimmed;
+    return `${trimmed.replace(/\D/g, "")}@s.whatsapp.net`;
+}
+
+function getInitials(name?: string | null, fallback = "?") {
+    if (!name) return fallback;
+    const parts = name.trim().split(/\s+/);
+    if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+    return name.slice(0, 2).toUpperCase();
+}
+
+export default function AiChatPage() {
+    const { sessionId } = useSessionProvider();
+    const { getSocket, joinSession } = useSocket();
+
+    const [config, setConfig] = useState<AiConfig>({
+        enabled: false,
+        audienceMode: "SPECIFIC",
+        allowedJids: [],
+        businessPrompt: DEFAULT_PROMPT,
+        handoffMessage: DEFAULT_HANDOFF,
+    });
+    const [allowedContacts, setAllowedContacts] = useState<AllowedContact[]>([]);
+    const [conversations, setConversations] = useState<AiConversation[]>([]);
+    const [requirements, setRequirements] = useState<AiRequirement[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [addingContact, setAddingContact] = useState(false);
+    const [runtime, setRuntime] = useState({ hasBaseUrl: false, hasApiKey: false, model: "" });
+    const [requirementSearch, setRequirementSearch] = useState("");
+    const [requirementStatusFilter, setRequirementStatusFilter] = useState<RequirementStatus | "ALL">("ALL");
+    const [pendingRequirementUpdate, setPendingRequirementUpdate] = useState<PendingRequirementUpdate | null>(null);
+    const [statusUpdating, setStatusUpdating] = useState(false);
+
+    // Relationship editing state
+    const [editingContact, setEditingContact] = useState<AllowedContact | null>(null);
+    const [category, setCategory] = useState<string>("FAMILY");
+    const [relationship, setRelationship] = useState<string>("");
+    const [addressAs, setAddressAs] = useState<string>("");
+    const [tone, setTone] = useState<string>("CASUAL");
+    const [updatingRelation, setUpdatingRelation] = useState(false);
+
+    const handleSaveRelationship = async () => {
+        if (!sessionId || !editingContact) return;
+        setUpdatingRelation(true);
+        try {
+            const res = await fetch(`/api/ai-chat/${sessionId}/relationships`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    jid: editingContact.jid,
+                    category,
+                    relationship,
+                    addressAs,
+                    tone
+                })
+            });
+            if (!res.ok) throw new Error("Failed to save relationship");
+            toast.success("Relationship settings updated");
+            
+            // Update local state
+            setAllowedContacts(prev => prev.map(c => {
+                if (c.jid === editingContact.jid) {
+                    return { ...c, category, relationship, addressAs, tone };
+                }
+                return c;
+            }));
+            
+            setEditingContact(null);
+        } catch (error) {
+            console.error(error);
+            toast.error("Failed to save relationship details");
+        } finally {
+            setUpdatingRelation(false);
+        }
+    };
+
+    // Contact search & autocomplete
+    const [contactQuery, setContactQuery] = useState("");
+    const [searchResults, setSearchResults] = useState<ContactSearchResult[]>([]);
+    const [searching, setSearching] = useState(false);
+    const [showDropdown, setShowDropdown] = useState(false);
+    const searchDropdownRef = useRef<HTMLDivElement>(null);
+
+    const activeCount = useMemo(() => conversations.filter(item => item.status === "ACTIVE").length, [conversations]);
+    const completedCount = useMemo(() => conversations.filter(item => item.status === "COMPLETED").length, [conversations]);
+    const manualCount = useMemo(() => conversations.filter(item => item.status === "MANUAL" || item.status === "NEEDS_HUMAN").length, [conversations]);
+    const requirementsReadyCount = useMemo(() => requirements.length || conversations.filter(item => Boolean(item.requirementDetails?.trim())).length, [requirements, conversations]);
+    const requirementItems = useMemo(() => conversations.filter(item => Boolean(item.requirementDetails?.trim() || item.summary?.trim())), [conversations]);
+    const pendingIntakeItems = useMemo(() => conversations.filter(item => !item.requirementDetails?.trim()), [conversations]);
+    const filteredRequirements = useMemo(() => {
+        const query = requirementSearch.trim().toLowerCase();
+        return requirements.filter(requirement => {
+            const contactName = requirement.contact?.name || requirement.contact?.notify || formatPhoneNumber(requirement.remoteJid);
+            const matchesStatus = requirementStatusFilter === "ALL" || requirement.status === requirementStatusFilter;
+            const matchesQuery = !query || [contactName, requirement.remoteJid, requirement.title, requirement.description, requirement.internalNotes || ""]
+                .join(" ")
+                .toLowerCase()
+                .includes(query);
+            return matchesStatus && matchesQuery;
+        });
+    }, [requirements, requirementSearch, requirementStatusFilter]);
+    const requirementStatusCounts = useMemo(() => {
+        return requirements.reduce((acc, requirement) => {
+            acc[requirement.status] = (acc[requirement.status] || 0) + 1;
+            return acc;
+        }, {} as Record<RequirementStatus, number>);
+    }, [requirements]);
+
+    const fetchData = async () => {
+        if (!sessionId) return;
+        setLoading(true);
+        try {
+            const [configRes, conversationsRes, requirementsRes] = await Promise.all([
+                fetch(`/api/ai-chat/${sessionId}/config`),
+                fetch(`/api/ai-chat/${sessionId}/conversations`),
+                fetch(`/api/ai-chat/${sessionId}/requirements`)
+            ]);
+
+            if (configRes.ok) {
+                const payload = await configRes.json();
+                const data = payload.data || {};
+                setConfig({
+                    enabled: !!data.enabled,
+                    audienceMode: data.audienceMode === "ALL_PRIVATE" ? "ALL_PRIVATE" : "SPECIFIC",
+                    allowedJids: Array.isArray(data.allowedJids) ? data.allowedJids : [],
+                    businessPrompt: data.businessPrompt || DEFAULT_PROMPT,
+                    handoffMessage: data.handoffMessage || DEFAULT_HANDOFF,
+                });
+                setAllowedContacts(payload.allowedContacts || []);
+                setRuntime(payload.runtime || { hasBaseUrl: false, hasApiKey: false, model: "" });
+            }
+
+            if (conversationsRes.ok) {
+                const payload = await conversationsRes.json();
+                setConversations(payload.data || []);
+            }
+
+            if (requirementsRes.ok) {
+                const payload = await requirementsRes.json();
+                setRequirements(payload.data || []);
+            }
+        } catch (error) {
+            console.error(error);
+            toast.error("Failed to load AI chat settings");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchData();
+    }, [sessionId]);
+
+    // Socket real-time subscription
+    useEffect(() => {
+        if (!sessionId) return;
+        joinSession(sessionId);
+
+        const socket = getSocket();
+        if (!socket) return;
+
+        const handleRealtimeUpdate = () => {
+            fetchData();
+        };
+
+        socket.on("ai.conversation.update", handleRealtimeUpdate);
+        socket.on("message.update", handleRealtimeUpdate);
+        socket.on("message.upsert", handleRealtimeUpdate);
+        socket.on("ai.requirement.update", handleRealtimeUpdate);
+
+        return () => {
+            socket.off("ai.conversation.update", handleRealtimeUpdate);
+            socket.off("message.update", handleRealtimeUpdate);
+            socket.off("message.upsert", handleRealtimeUpdate);
+            socket.off("ai.requirement.update", handleRealtimeUpdate);
+        };
+    }, [sessionId]);
+
+    // Debounced search for contacts
+    useEffect(() => {
+        if (!contactQuery.trim() || contactQuery.trim().length < 2 || !sessionId) {
+            setSearchResults([]);
+            setSearching(false);
+            return;
+        }
+
+        const timer = setTimeout(async () => {
+            setSearching(true);
+            try {
+                const res = await fetch(`/api/contacts/${sessionId}?search=${encodeURIComponent(contactQuery.trim())}&limit=6`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setSearchResults(data.data || data.contacts || []);
+                    setShowDropdown(true);
+                }
+            } catch (err) {
+                console.error("Search failed", err);
+            } finally {
+                setSearching(false);
+            }
+        }, 250);
+
+        return () => clearTimeout(timer);
+    }, [contactQuery, sessionId]);
+
+    // Close search dropdown on click outside
+    useEffect(() => {
+        const handleClickOutside = (e: MouseEvent) => {
+            if (searchDropdownRef.current && !searchDropdownRef.current.contains(e.target as Node)) {
+                setShowDropdown(false);
+            }
+        };
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => document.removeEventListener("mousedown", handleClickOutside);
+    }, []);
+
+    // Save full configuration
+    const saveConfig = async (overrideConfig?: Partial<AiConfig>, autoInit = false) => {
+        if (!sessionId) return;
+        setSaving(true);
+        const payloadToSave = {
+            ...config,
+            ...(overrideConfig || {}),
+            autoInitConversations: autoInit
+        };
+
+        try {
+            const res = await fetch(`/api/ai-chat/${sessionId}/config`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payloadToSave)
+            });
+
+            if (!res.ok) throw new Error("Failed to save AI chat config");
+            toast.success("AI chat settings saved");
+            await fetchData();
+        } catch (error) {
+            console.error(error);
+            toast.error("Failed to save AI chat settings");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    // Add contact directly & auto-save
+    const addContact = async (jid: string, contactData?: Partial<AllowedContact>) => {
+        const formatted = formatJid(jid);
+        if (!formatted) return;
+
+        if (config.allowedJids.includes(formatted)) {
+            toast.info("This contact is already in the pilot list");
+            setContactQuery("");
+            setShowDropdown(false);
+            return;
+        }
+
+        setAddingContact(true);
+        const updatedJids = [...config.allowedJids, formatted];
+        setConfig(prev => ({ ...prev, allowedJids: updatedJids }));
+
+        // Optimistically update allowedContacts
+        const newAllowed: AllowedContact = {
+            jid: formatted,
+            name: contactData?.name || null,
+            notify: contactData?.notify || null,
+            profilePic: contactData?.profilePic || null,
+            phone: formatPhoneNumber(formatted)
+        };
+        setAllowedContacts(prev => [...prev.filter(c => c.jid !== formatted), newAllowed]);
+        setContactQuery("");
+        setShowDropdown(false);
+
+        // Auto-save and auto-init conversation record
+        try {
+            await saveConfig({ allowedJids: updatedJids }, true);
+            toast.success(`Added ${contactData?.name || formatPhoneNumber(formatted)} to pilot intake`);
+        } finally {
+            setAddingContact(false);
+        }
+    };
+
+    // Remove contact & auto-save
+    const removeContact = async (jid: string) => {
+        const updatedJids = config.allowedJids.filter(item => item !== jid);
+        setConfig(prev => ({ ...prev, allowedJids: updatedJids }));
+        setAllowedContacts(prev => prev.filter(item => item.jid !== jid));
+        await saveConfig({ allowedJids: updatedJids });
+        toast.success("Contact removed from pilot intake");
+    };
+
+    const handleManualAdd = () => {
+        if (!contactQuery.trim()) return;
+        addContact(contactQuery);
+    };
+
+    const updateConversationStatus = async (conversationId: string, status: AiConversation["status"]) => {
+        if (!sessionId) return;
+        try {
+            const res = await fetch(`/api/ai-chat/${sessionId}/conversations/${conversationId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ status })
+            });
+
+            if (!res.ok) throw new Error("Failed to update conversation");
+            toast.success(status === "MANUAL" ? "Manual takeover enabled" : "Conversation updated");
+            fetchData();
+        } catch (error) {
+            console.error(error);
+            toast.error("Failed to update conversation");
+        }
+    };
+
+
+    const startRequirementStatusChange = (requirement: AiRequirement, status: RequirementStatus) => {
+        if (requirement.status === status) return;
+        setPendingRequirementUpdate({
+            requirement,
+            status,
+            message: buildRequirementStatusMessage(status, requirement.description)
+        });
+    };
+
+    const updateRequirement = async (notifyContact: boolean) => {
+        if (!sessionId || !pendingRequirementUpdate) return;
+        setStatusUpdating(true);
+        try {
+            const res = await fetch(`/api/ai-chat/${sessionId}/requirements/${pendingRequirementUpdate.requirement.id}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    status: pendingRequirementUpdate.status,
+                    message: pendingRequirementUpdate.message,
+                    notifyContact
+                })
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(payload.message || "Failed to update requirement");
+            toast.success(notifyContact ? "Requirement updated and contact notified" : "Requirement updated without sending message");
+            setPendingRequirementUpdate(null);
+            await fetchData();
+        } catch (error: any) {
+            console.error(error);
+            toast.error(error?.message || "Failed to update requirement");
+        } finally {
+            setStatusUpdating(false);
+        }
+    };
+
+    const updateRequirementNotes = async (requirement: AiRequirement, internalNotes: string) => {
+        if (!sessionId) return;
+        try {
+            const res = await fetch(`/api/ai-chat/${sessionId}/requirements/${requirement.id}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ internalNotes })
+            });
+            if (!res.ok) throw new Error("Failed to update notes");
+            setRequirements(prev => prev.map(item => item.id === requirement.id ? { ...item, internalNotes } : item));
+        } catch (error) {
+            console.error(error);
+            toast.error("Failed to update notes");
+        }
+    };
+
+    return (
+        <SessionGuard>
+            <div className="space-y-6">
+                {/* Header */}
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                        <h2 className="text-xl sm:text-3xl font-bold tracking-tight">AI Auto Chat</h2>
+                        <p className="text-muted-foreground text-sm mt-1">Pilot an intelligent AI intake assistant for selected WhatsApp contacts.</p>
+                    </div>
+                    <Button variant="outline" onClick={fetchData} disabled={loading}>
+                        <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+                        Refresh
+                    </Button>
+                </div>
+
+                {/* Metric Summary Cards */}
+                <div className="grid gap-4 md:grid-cols-4">
+                    <Card>
+                        <CardContent className="pt-5">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Active Intake</p>
+                                    <p className="text-2xl font-semibold">{activeCount}</p>
+                                </div>
+                                <Clock3 className="h-5 w-5 text-blue-500" />
+                            </div>
+                        </CardContent>
+                    </Card>
+                    <Card>
+                        <CardContent className="pt-5">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Completed Intake</p>
+                                    <p className="text-2xl font-semibold">{completedCount}</p>
+                                </div>
+                                <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                            </div>
+                        </CardContent>
+                    </Card>
+                    <Card>
+                        <CardContent className="pt-5">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Human Queue</p>
+                                    <p className="text-2xl font-semibold">{manualCount}</p>
+                                </div>
+                                <Hand className="h-5 w-5 text-amber-500" />
+                            </div>
+                        </CardContent>
+                    </Card>
+                    <Card>
+                        <CardContent className="pt-5">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Requirements Stored</p>
+                                    <p className="text-2xl font-semibold">{requirementsReadyCount}</p>
+                                </div>
+                                <MessageSquare className="h-5 w-5 text-primary" />
+                            </div>
+                        </CardContent>
+                    </Card>
+                </div>
+
+                <Tabs defaultValue="requirements" className="space-y-4">
+                    <TabsList className="grid w-full grid-cols-2 md:w-auto md:grid-cols-4">
+                        <TabsTrigger value="overview">Overview</TabsTrigger>
+                        <TabsTrigger value="requirements">Requirements</TabsTrigger>
+                        <TabsTrigger value="settings">Pilot Settings</TabsTrigger>
+                        <TabsTrigger value="conversations">Conversations</TabsTrigger>
+                    </TabsList>
+
+                    <TabsContent value="overview" className="space-y-4">
+                        <Card>
+                            <CardHeader>
+                                <CardTitle className="flex items-center gap-2">
+                                    <Sparkles className="h-5 w-5 text-primary" />
+                                    AI Intake Overview
+                                </CardTitle>
+                                <CardDescription>The AI collects requirements only from pilot contacts, stores them as work items, and lets you take over manually when needed.</CardDescription>
+                            </CardHeader>
+                            <CardContent className="grid gap-3 md:grid-cols-3">
+                                <div className="rounded-lg border bg-muted/20 p-4">
+                                    <p className="text-sm font-semibold">1. Capture</p>
+                                    <p className="mt-1 text-sm text-muted-foreground">Pilot contact sends a requirement in WhatsApp.</p>
+                                </div>
+                                <div className="rounded-lg border bg-muted/20 p-4">
+                                    <p className="text-sm font-semibold">2. Track</p>
+                                    <p className="mt-1 text-sm text-muted-foreground">Requirement appears in the table with a status.</p>
+                                </div>
+                                <div className="rounded-lg border bg-muted/20 p-4">
+                                    <p className="text-sm font-semibold">3. Update</p>
+                                    <p className="mt-1 text-sm text-muted-foreground">Change status and choose whether to notify the contact.</p>
+                                </div>
+                            </CardContent>
+                        </Card>
+                    </TabsContent>
+
+                    <TabsContent value="requirements" className="space-y-4">
+                        <Card>
+                            <CardHeader>
+                                <CardTitle className="flex items-center gap-2">
+                                    <ClipboardList className="h-5 w-5 text-primary" />
+                                    Requirements
+                                </CardTitle>
+                                <CardDescription>Captured customer requirements from any pilot contact are stored here as work items. Search by contact or requirement, then update status and optionally notify the contact.</CardDescription>
+                            </CardHeader>
+                            <CardContent className="space-y-4">
+                                <div className="grid gap-3 md:grid-cols-[1fr_220px]">
+                                    <div className="relative">
+                                        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                                        <Input
+                                            className="pl-9"
+                                            placeholder="Search contact, phone, requirement, or notes..."
+                                            value={requirementSearch}
+                                            onChange={event => setRequirementSearch(event.target.value)}
+                                        />
+                                    </div>
+                                    <Select value={requirementStatusFilter} onValueChange={value => setRequirementStatusFilter(value as RequirementStatus | "ALL")}>
+                                        <SelectTrigger>
+                                            <SelectValue placeholder="Filter status" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="ALL">All statuses ({requirements.length})</SelectItem>
+                                            {requirementStatusOptions.map(option => (
+                                                <SelectItem key={option.value} value={option.value}>{option.label} ({requirementStatusCounts[option.value] || 0})</SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                                {requirements.length === 0 ? (
+                                    <div className="rounded-lg border border-dashed p-8 text-center">
+                                        <ClipboardList className="mx-auto h-8 w-8 text-muted-foreground/60 mb-2" />
+                                        <p className="text-sm font-medium">No requirements captured yet</p>
+                                        <p className="mt-1 text-xs text-muted-foreground">When a pilot contact shares a requirement, it will appear here as a table row.</p>
+                                    </div>
+                                ) : filteredRequirements.length === 0 ? (
+                                    <div className="rounded-lg border border-dashed p-8 text-center">
+                                        <Search className="mx-auto h-8 w-8 text-muted-foreground/60 mb-2" />
+                                        <p className="text-sm font-medium">No matching requirements</p>
+                                        <p className="mt-1 text-xs text-muted-foreground">Try a different contact, phone, requirement, or status filter.</p>
+                                    </div>
+                                ) : (
+                                    <Table>
+                                        <TableHeader>
+                                            <TableRow>
+                                                <TableHead>Contact</TableHead>
+                                                <TableHead>Requirement</TableHead>
+                                                <TableHead>Status</TableHead>
+                                                <TableHead>Last Updated</TableHead>
+                                                <TableHead>Internal Notes</TableHead>
+                                                <TableHead className="text-right">Actions</TableHead>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {filteredRequirements.map(requirement => {
+                                                const contactName = requirement.contact?.name || requirement.contact?.notify || formatPhoneNumber(requirement.remoteJid);
+                                                return (
+                                                    <TableRow key={requirement.id}>
+                                                        <TableCell>
+                                                            <div className="flex items-center gap-3">
+                                                                <Avatar className="h-9 w-9 border">
+                                                                    <AvatarImage src={requirement.contact?.profilePic || undefined} alt={contactName} />
+                                                                    <AvatarFallback className="bg-primary/10 text-primary text-xs font-semibold">{getInitials(contactName)}</AvatarFallback>
+                                                                </Avatar>
+                                                                <div className="min-w-0">
+                                                                    <p className="font-medium truncate">{contactName}</p>
+                                                                    <p className="text-xs text-muted-foreground font-mono">{formatPhoneNumber(requirement.remoteJid)}</p>
+                                                                </div>
+                                                            </div>
+                                                        </TableCell>
+                                                        <TableCell className="max-w-[320px]">
+                                                            <p className="font-medium">{requirement.title}</p>
+                                                            <p className="mt-1 text-sm text-muted-foreground whitespace-pre-wrap line-clamp-3">{requirement.description}</p>
+                                                        </TableCell>
+                                                        <TableCell>
+                                                            <div className="space-y-2">
+                                                                {requirementStatusBadge(requirement.status)}
+                                                                <Select value={requirement.status} onValueChange={value => startRequirementStatusChange(requirement, value as RequirementStatus)}>
+                                                                    <SelectTrigger className="h-8 w-[165px]">
+                                                                        <SelectValue />
+                                                                    </SelectTrigger>
+                                                                    <SelectContent>
+                                                                        {requirementStatusOptions.map(option => (
+                                                                            <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                                                                        ))}
+                                                                    </SelectContent>
+                                                                </Select>
+                                                            </div>
+                                                        </TableCell>
+                                                        <TableCell className="text-sm text-muted-foreground">
+                                                            {new Date(requirement.updatedAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                                                            {requirement.lastStatusNotifiedAt && <p className="mt-1 text-xs text-emerald-600">Contact notified</p>}
+                                                        </TableCell>
+                                                        <TableCell>
+                                                            <Textarea
+                                                                className="min-h-[68px] w-[220px] resize-none"
+                                                                placeholder="Add internal note"
+                                                                defaultValue={requirement.internalNotes || ""}
+                                                                onBlur={event => updateRequirementNotes(requirement, event.target.value)}
+                                                            />
+                                                        </TableCell>
+                                                        <TableCell className="text-right">
+                                                            <Button variant="outline" size="sm" asChild>
+                                                                <Link href={`/dashboard/chat?jid=${encodeURIComponent(requirement.remoteJid)}`}>
+                                                                    <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                                                                    Open Chat
+                                                                </Link>
+                                                            </Button>
+                                                        </TableCell>
+                                                    </TableRow>
+                                                );
+                                            })}
+                                        </TableBody>
+                                    </Table>
+                                )}
+                            </CardContent>
+                        </Card>
+                    </TabsContent>
+
+                    <TabsContent value="settings" className="space-y-4">
+                {/* Settings Card */}
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Sparkles className="h-5 w-5 text-primary" />
+                            Pilot Settings
+                        </CardTitle>
+                        <CardDescription>Select specific WhatsApp contacts to test the AI intake assistant, then expand to all chats.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-6">
+                        {/* Runtime Model Status */}
+                        <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs font-medium text-muted-foreground mr-1">Backend Engine:</span>
+                                <Badge variant={runtime.hasBaseUrl ? "default" : "destructive"}>
+                                    Server {runtime.hasBaseUrl ? "Connected" : "Missing"}
+                                </Badge>
+                                <Badge variant={runtime.hasApiKey ? "default" : "destructive"}>
+                                    API Key {runtime.hasApiKey ? "Active" : "Missing"}
+                                </Badge>
+                                <Badge variant="outline" className="font-mono">
+                                    Model: {runtime.model || "qwen2.5-coder:3b"}
+                                </Badge>
+                            </div>
+                        </div>
+
+                        {/* Enable Switch */}
+                        <div className="flex items-center justify-between rounded-lg border p-4">
+                            <Label htmlFor="ai-enabled" className="flex flex-col gap-1 cursor-pointer">
+                                <span className="font-medium">Enable AI Auto Chat</span>
+                                <span className="text-xs text-muted-foreground">When enabled, the AI automatically replies only within the selected audience.</span>
+                            </Label>
+                            <Switch
+                                id="ai-enabled"
+                                checked={config.enabled}
+                                onCheckedChange={enabled => setConfig(prev => ({ ...prev, enabled }))}
+                            />
+                        </div>
+
+                        {/* Audience Mode */}
+                        <div className="grid gap-2">
+                            <Label>Audience Scope</Label>
+                            <Select
+                                value={config.audienceMode}
+                                onValueChange={(audienceMode: "SPECIFIC" | "ALL_PRIVATE") => setConfig(prev => ({ ...prev, audienceMode }))}
+                            >
+                                <SelectTrigger>
+                                    <SelectValue placeholder="Select audience" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="SPECIFIC">Pilot - Selected Contacts Only</SelectItem>
+                                    <SelectItem value="ALL_PRIVATE">All Private 1-on-1 Chats</SelectItem>
+                                </SelectContent>
+                            </Select>
+                            <p className="text-xs text-muted-foreground">Group chats are always excluded from AI auto chat.</p>
+                        </div>
+
+                        {/* Pilot Contacts Section (when SPECIFIC is selected) */}
+                        {config.audienceMode === "SPECIFIC" && (
+                            <div className="space-y-4 rounded-lg border p-4 bg-background">
+                                <div className="flex items-center justify-between">
+                                    <Label className="flex items-center gap-2 font-semibold">
+                                        <UserRoundCheck className="h-4 w-4 text-primary" />
+                                        Pilot Contacts ({allowedContacts.length})
+                                    </Label>
+                                    <span className="text-xs text-muted-foreground">Contacts added here save automatically</span>
+                                </div>
+
+                                {/* Contact Search / Manual Input Bar */}
+                                <div className="relative" ref={searchDropdownRef}>
+                                    <div className="flex gap-2">
+                                        <div className="relative flex-1">
+                                            <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                                            <Input
+                                                placeholder="Search contact name or type phone number (e.g. 919100282669)..."
+                                                value={contactQuery}
+                                                onChange={e => {
+                                                    setContactQuery(e.target.value);
+                                                    setShowDropdown(true);
+                                                }}
+                                                onFocus={() => setShowDropdown(true)}
+                                                onKeyDown={e => {
+                                                    if (e.key === "Enter") {
+                                                        e.preventDefault();
+                                                        handleManualAdd();
+                                                    }
+                                                }}
+                                                className="pl-9"
+                                            />
+                                        </div>
+                                        <Button
+                                            variant="default"
+                                            onClick={handleManualAdd}
+                                            disabled={addingContact || !contactQuery.trim()}
+                                        >
+                                            <Plus className="mr-1.5 h-4 w-4" />
+                                            Add
+                                        </Button>
+                                    </div>
+
+                                    {/* Autocomplete Dropdown */}
+                                    {showDropdown && (contactQuery.trim().length >= 2 || searchResults.length > 0) && (
+                                        <div className="absolute z-50 mt-1 w-full rounded-md border bg-popover text-popover-foreground shadow-lg overflow-hidden">
+                                            {searching ? (
+                                                <div className="p-3 text-xs text-muted-foreground text-center">Searching contacts...</div>
+                                            ) : searchResults.length > 0 ? (
+                                                <div className="max-h-60 overflow-y-auto divide-y">
+                                                    {searchResults.map(result => {
+                                                        const isAlreadyAdded = config.allowedJids.includes(result.jid) || Boolean(result.remoteJidAlt && config.allowedJids.includes(result.remoteJidAlt));
+                                                        return (
+                                                            <div
+                                                                key={result.id || result.jid}
+                                                                className={`flex items-center justify-between p-2.5 hover:bg-muted/50 cursor-pointer ${isAlreadyAdded ? "opacity-50" : ""}`}
+                                                                onClick={() => {
+                                                                    if (!isAlreadyAdded) {
+                                                                        addContact(result.jid, {
+                                                                            name: result.name,
+                                                                            notify: result.notify,
+                                                                            profilePic: result.profilePic
+                                                                        });
+                                                                    }
+                                                                }}
+                                                            >
+                                                                <div className="flex items-center gap-3 min-w-0">
+                                                                    <Avatar className="h-8 w-8">
+                                                                        <AvatarImage src={result.profilePic || undefined} />
+                                                                        <AvatarFallback>{getInitials(result.name || result.notify)}</AvatarFallback>
+                                                                    </Avatar>
+                                                                    <div className="min-w-0">
+                                                                        <p className="text-sm font-medium truncate">{result.name || result.notify || "Unknown Contact"}</p>
+                                                                        <p className="text-xs text-muted-foreground font-mono">{formatPhoneNumber(result.jid)}</p>
+                                                                    </div>
+                                                                </div>
+                                                                <Button size="sm" variant={isAlreadyAdded ? "secondary" : "outline"} disabled={isAlreadyAdded}>
+                                                                    {isAlreadyAdded ? "Added" : "Select"}
+                                                                </Button>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            ) : (
+                                                <div className="p-3 text-xs text-muted-foreground text-center">
+                                                    No contacts matching &quot;{contactQuery}&quot;. Press <b>Add</b> to add as phone number.
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Rich Contacts List */}
+                                <div className="space-y-2 pt-2">
+                                    {allowedContacts.length === 0 ? (
+                                        <div className="rounded-lg border border-dashed p-6 text-center">
+                                            <UserPlus className="mx-auto h-8 w-8 text-muted-foreground/60 mb-2" />
+                                            <p className="text-sm font-medium">No pilot contacts added yet</p>
+                                            <p className="text-xs text-muted-foreground mt-1">Search for a contact above or type a phone number to start piloting the AI intake assistant.</p>
+                                        </div>
+                                    ) : (
+                                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                                            {allowedContacts.map(contact => {
+                                                const label = contact.name || contact.notify || "Contact";
+                                                return (
+                                                    <div className="min-w-0">
+                                                                <p className="text-sm font-semibold truncate leading-tight">{label}</p>
+                                                                <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5 font-mono">
+                                                                    <Phone className="h-3 w-3" />
+                                                                    {contact.phone || formatPhoneNumber(contact.jid)}
+                                                                </p>
+                                                                {contact.notify && contact.name && contact.notify !== contact.name && (
+                                                                    <p className="text-[11px] text-muted-foreground truncate">~{contact.notify}</p>
+                                                                )}
+                                                                <div className="flex flex-wrap gap-1 mt-1">
+                                                                    {contact.category && (
+                                                                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-muted/40 uppercase font-mono tracking-wider">
+                                                                            {contact.category}
+                                                                        </Badge>
+                                                                    )}
+                                                                    {contact.relationship && (
+                                                                        <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                                                                            {contact.relationship}
+                                                                        </Badge>
+                                                                    )}
+                                                                    {contact.addressAs && (
+                                                                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-primary/30 text-primary bg-primary/5">
+                                                                            &ldquo;{contact.addressAs}&rdquo;
+                                                                        </Badge>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex items-center gap-1 ml-2 flex-shrink-0">
+                                                            <Button
+                                                                variant="ghost"
+                                                                size="icon"
+                                                                onClick={() => {
+                                                                    setEditingContact(contact);
+                                                                    setCategory(contact.category || "FAMILY");
+                                                                    setRelationship(contact.relationship || "");
+                                                                    setAddressAs(contact.addressAs || "");
+                                                                    setTone(contact.tone || "CASUAL");
+                                                                }}
+                                                                className="text-muted-foreground hover:text-primary h-8 w-8"
+                                                                title="Relationship settings"
+                                                            >
+                                                                <Edit2 className="h-4 w-4" />
+                                                            </Button>
+                                                            <Button
+                                                                variant="ghost"
+                                                                size="icon"
+                                                                onClick={() => removeContact(contact.jid)}
+                                                                className="text-muted-foreground hover:text-destructive h-8 w-8"
+                                                                title="Remove contact"
+                                                            >
+                                                                <Trash2 className="h-4 w-4" />
+                                                            </Button>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Prompt Customization */}
+                        <div className="grid gap-2">
+                            <Label>AI Intake Assistant Prompt</Label>
+                            <Textarea
+                                className="min-h-[130px]"
+                                value={config.businessPrompt}
+                                onChange={event => setConfig(prev => ({ ...prev, businessPrompt: event.target.value }))}
+                            />
+                            <p className="text-xs text-muted-foreground">Instructs the assistant on what questions to ask and how to collect requirements.</p>
+                        </div>
+
+                        {/* Completion / Handoff Message */}
+                        <div className="grid gap-2">
+                            <Label>Intake Completion Message</Label>
+                            <Textarea
+                                className="min-h-[80px]"
+                                value={config.handoffMessage}
+                                onChange={event => setConfig(prev => ({ ...prev, handoffMessage: event.target.value }))}
+                            />
+                            <p className="text-xs text-muted-foreground">Sent automatically when all required details have been gathered.</p>
+                        </div>
+
+                        <Button onClick={() => saveConfig()} disabled={saving || !sessionId} className="w-full sm:w-auto">
+                            {saving ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                            Save AI Settings
+                        </Button>
+                    </CardContent>
+                </Card>
+
+                    </TabsContent>
+
+                    <TabsContent value="conversations" className="space-y-4">
+                {/* AI Conversations Card */}
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Bot className="h-5 w-5 text-primary" />
+                            AI Conversations & Intake Details
+                        </CardTitle>
+                        <CardDescription>Review customer details gathered by the AI, read summaries, or take over manually.</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        {conversations.length === 0 ? (
+                            <div className="rounded-lg border border-dashed p-8 text-center">
+                                <MessageSquare className="mx-auto h-8 w-8 text-muted-foreground/60 mb-2" />
+                                <p className="text-sm font-medium">No AI conversations yet</p>
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                    When you add a pilot contact above and they message your WhatsApp session, their conversation details will appear here automatically.
+                                </p>
+                            </div>
+                        ) : (
+                            <div className="space-y-4">
+                                {conversations.map(conversation => {
+                                    const title = displayName(conversation);
+                                    const phoneFormatted = formatPhoneNumber(conversation.remoteJid);
+                                    return (
+                                        <div key={conversation.id} className="rounded-lg border p-4 bg-card shadow-sm space-y-4">
+                                            {/* Conversation Header */}
+                                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                                <div className="flex items-center gap-3 min-w-0">
+                                                    <Avatar className="h-11 w-11 border">
+                                                        <AvatarImage src={conversation.contact?.profilePic || undefined} alt={title} />
+                                                        <AvatarFallback className="bg-primary/10 text-primary font-semibold text-sm">
+                                                            {getInitials(title)}
+                                                        </AvatarFallback>
+                                                    </Avatar>
+                                                    <div className="min-w-0">
+                                                        <div className="flex flex-wrap items-center gap-2">
+                                                            <h3 className="font-semibold text-base truncate">{title}</h3>
+                                                            {statusBadge(conversation.status)}
+                                                        </div>
+                                                        <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono mt-0.5">
+                                                            <span>{phoneFormatted}</span>
+                                                            <span>•</span>
+                                                            <span>Updated {new Date(conversation.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div className="flex items-center gap-2 flex-shrink-0">
+                                                    <Button variant="outline" size="sm" asChild>
+                                                        <Link href={`/dashboard/chat?jid=${encodeURIComponent(conversation.remoteJid)}`}>
+                                                            <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                                                            Open Chat
+                                                        </Link>
+                                                    </Button>
+
+                                                    {conversation.status !== "MANUAL" ? (
+                                                        <Button
+                                                            variant="secondary"
+                                                            size="sm"
+                                                            onClick={() => updateConversationStatus(conversation.id, "MANUAL")}
+                                                        >
+                                                            <Hand className="mr-1.5 h-3.5 w-3.5" />
+                                                            Take Over
+                                                        </Button>
+                                                    ) : (
+                                                        <Button
+                                                            variant="default"
+                                                            size="sm"
+                                                            onClick={() => updateConversationStatus(conversation.id, "ACTIVE")}
+                                                        >
+                                                            <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                                                            Resume AI
+                                                        </Button>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            {/* Intake Data Grid */}
+                                            <div className="grid gap-3 sm:grid-cols-2">
+                                                <div className="rounded-md border bg-muted/20 p-3.5">
+                                                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Requirement Details</p>
+                                                    <p className="mt-1.5 text-sm whitespace-pre-wrap font-medium">
+                                                        {conversation.requirementDetails || <span className="text-muted-foreground/70 font-normal italic">Waiting for customer input...</span>}
+                                                    </p>
+                                                </div>
+
+                                                <div className="rounded-md border bg-muted/20 p-3.5">
+                                                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Notes</p>
+                                                    <p className="mt-1.5 text-sm whitespace-pre-wrap font-medium">
+                                                        {conversation.notes || <span className="text-muted-foreground/70 font-normal italic">No notes collected yet</span>}
+                                                    </p>
+                                                </div>
+
+                                                <div className="rounded-md border bg-muted/20 p-3.5">
+                                                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Preferred Meeting Time</p>
+                                                    <p className="mt-1.5 text-sm font-medium">
+                                                        {conversation.preferredMeetingTime || <span className="text-muted-foreground/70 font-normal italic">Only asked if customer requests meeting</span>}
+                                                    </p>
+                                                </div>
+
+                                                <div className="rounded-md border bg-muted/20 p-3.5">
+                                                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Summary</p>
+                                                    <p className="mt-1.5 text-sm whitespace-pre-wrap font-medium">
+                                                        {conversation.summary || <span className="text-muted-foreground/70 font-normal italic">Generated when details are completed</span>}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </CardContent>
+                </Card>
+                    </TabsContent>
+                </Tabs>
+
+                <Dialog open={!!pendingRequirementUpdate} onOpenChange={open => !open && setPendingRequirementUpdate(null)}>
+                    <DialogContent>
+                        <DialogHeader>
+                            <DialogTitle>Update requirement status</DialogTitle>
+                            <DialogDescription>
+                                Review the WhatsApp message before sending it to the contact, or update the status without sending.
+                            </DialogDescription>
+                        </DialogHeader>
+                        {pendingRequirementUpdate && (
+                            <div className="space-y-4">
+                                <div className="rounded-lg border bg-muted/30 p-3">
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">New Status</p>
+                                    <div className="mt-2">{requirementStatusBadge(pendingRequirementUpdate.status)}</div>
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label>Message Preview</Label>
+                                    <Textarea
+                                        className="min-h-[120px]"
+                                        value={pendingRequirementUpdate.message}
+                                        onChange={event => setPendingRequirementUpdate(prev => prev ? { ...prev, message: event.target.value } : prev)}
+                                    />
+                                </div>
+                            </div>
+                        )}
+                        <DialogFooter>
+                            <Button variant="outline" onClick={() => setPendingRequirementUpdate(null)} disabled={statusUpdating}>Cancel</Button>
+                            <Button variant="secondary" onClick={() => updateRequirement(false)} disabled={statusUpdating}>Update Without Sending</Button>
+                            <Button onClick={() => updateRequirement(true)} disabled={statusUpdating}>
+                                <Send className="mr-2 h-4 w-4" />
+                                Send Update
+                            </Button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
+
+                {/* Contact Relationship Settings Dialog */}
+                <Dialog open={editingContact !== null} onOpenChange={(open) => { if (!open) setEditingContact(null); }}>
+                    <DialogContent className="sm:max-w-[425px]">
+                        <DialogHeader>
+                            <DialogTitle>Relationship Settings</DialogTitle>
+                            <DialogDescription>
+                                Set the context category, relationship description, form of address and tone.
+                            </DialogDescription>
+                        </DialogHeader>
+                        <div className="grid gap-4 py-4">
+                            <div className="grid grid-cols-4 items-center gap-4">
+                                <Label htmlFor="category" className="text-right">
+                                    Category
+                                </Label>
+                                <div className="col-span-3">
+                                    <Select value={category} onValueChange={setCategory}>
+                                        <SelectTrigger id="category">
+                                            <SelectValue placeholder="Select Category" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="FAMILY">Family</SelectItem>
+                                            <SelectItem value="FRIEND">Friend</SelectItem>
+                                            <SelectItem value="OFFICE">Office/Colleague</SelectItem>
+                                            <SelectItem value="CUSTOMER">Customer/Client</SelectItem>
+                                            <SelectItem value="OTHER">Other</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-4 items-center gap-4">
+                                <Label htmlFor="relationship" className="text-right">
+                                    Relationship
+                                </Label>
+                                <Input
+                                    id="relationship"
+                                    placeholder="e.g. Younger Brother, Client, Manager"
+                                    value={relationship}
+                                    onChange={(e) => setRelationship(e.target.value)}
+                                    className="col-span-3"
+                                />
+                            </div>
+                            <div className="grid grid-cols-4 items-center gap-4">
+                                <Label htmlFor="addressAs" className="text-right">
+                                    Address As
+                                </Label>
+                                <Input
+                                    id="addressAs"
+                                    placeholder="e.g. Bro, Sir, Appa, Hi Geetha"
+                                    value={addressAs}
+                                    onChange={(e) => setAddressAs(e.target.value)}
+                                    className="col-span-3"
+                                />
+                            </div>
+                            <div className="grid grid-cols-4 items-center gap-4">
+                                <Label htmlFor="tone" className="text-right">
+                                    Tone
+                                </Label>
+                                <div className="col-span-3">
+                                    <Select value={tone} onValueChange={setTone}>
+                                        <SelectTrigger id="tone">
+                                            <SelectValue placeholder="Select Tone" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="CASUAL">Casual</SelectItem>
+                                            <SelectItem value="WARM">Warm & Friendly</SelectItem>
+                                            <SelectItem value="RESPECTFUL">Respectful</SelectItem>
+                                            <SelectItem value="PROFESSIONAL">Professional</SelectItem>
+                                            <SelectItem value="HUMOROUS">Humorous</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                            </div>
+                        </div>
+                        <DialogFooter>
+                            <Button variant="outline" onClick={() => setEditingContact(null)} disabled={updatingRelation}>
+                                Cancel
+                            </Button>
+                            <Button onClick={handleSaveRelationship} disabled={updatingRelation}>
+                                {updatingRelation ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                                Save Settings
+                            </Button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
+            </div>
+        </SessionGuard>
+    );
+}

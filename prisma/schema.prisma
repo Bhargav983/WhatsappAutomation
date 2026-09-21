@@ -1,0 +1,465 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model aichatconfig {
+  id             String   @id @default(cuid())
+  sessionId      String   @unique(map: "AiChatConfig_sessionId_key")
+  enabled        Boolean  @default(false)
+  audienceMode   String   @default("SPECIFIC")
+  allowedJids    String?  @db.LongText
+  businessPrompt String?  @db.Text
+  handoffMessage String?  @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  session        session  @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "AiChatConfig_sessionId_fkey")
+}
+
+model aiconversation {
+  id                   String          @id @default(cuid())
+  sessionId            String
+  remoteJid            String
+  status               String          @default("ACTIVE")
+  requirementDetails   String?         @db.Text
+  notes                String?         @db.Text
+  preferredMeetingTime String?
+  summary              String?         @db.Text
+  lastAiReplyAt        DateTime?
+  lastUserMessageAt    DateTime?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime @updatedAt
+  session              session         @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "AiConversation_sessionId_fkey")
+  airequirement        airequirement[]
+
+  @@unique([sessionId, remoteJid], map: "AiConversation_sessionId_remoteJid_key")
+  @@index([sessionId, status], map: "AiConversation_sessionId_status_idx")
+}
+
+model airequirement {
+  id                   String          @id @default(cuid())
+  sessionId            String
+  conversationId       String?
+  remoteJid            String
+  title                String
+  description          String          @db.Text
+  status               String          @default("NEW")
+  internalNotes        String?         @db.Text
+  lastStatusNotifiedAt DateTime?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime @updatedAt
+  aiconversation       aiconversation? @relation(fields: [conversationId], references: [id], map: "AiRequirement_conversationId_fkey")
+  session              session         @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "AiRequirement_sessionId_fkey")
+
+  @@index([conversationId], map: "AiRequirement_conversationId_fkey")
+  @@index([sessionId, remoteJid], map: "AiRequirement_sessionId_remoteJid_idx")
+  @@index([sessionId, status], map: "AiRequirement_sessionId_status_idx")
+}
+
+model authstate {
+  id        String @id @default(cuid())
+  sessionId String
+  key       String
+  value     String @db.LongText
+
+  @@unique([sessionId, key], map: "AuthState_sessionId_key_key")
+}
+
+model autoreply {
+  id          String   @id @default(cuid())
+  sessionId   String
+  keyword     String
+  matchType   String
+  response    String?  @db.Text
+  isMedia     Boolean  @default(false)
+  mediaUrl    String?
+  mediaType   String?
+  triggerType String   @default("ALL")
+  createdAt   DateTime @default(now())
+  session     session  @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "AutoReply_sessionId_fkey")
+
+  @@index([sessionId], map: "AutoReply_sessionId_fkey")
+}
+
+model botconfig {
+  id                   String                  @id @default(cuid())
+  sessionId            String                  @unique(map: "BotConfig_sessionId_key")
+  enabled              Boolean                 @default(true)
+  botName              String                  @default("WA-AKG Bot")
+  botMode              botconfig_botMode       @default(OWNER)
+  botAllowedJids       String?                 @db.LongText
+  botBlockedJids       String?                 @db.LongText
+  autoReplyMode        botconfig_autoReplyMode @default(ALL)
+  autoReplyAllowedJids String?                 @db.LongText
+  autoReplyBlockedJids String?                 @db.LongText
+  enableSticker        Boolean                 @default(true)
+  enableVideoSticker   Boolean                 @default(true)
+  maxStickerDuration   Int                     @default(10)
+  enablePing           Boolean                 @default(true)
+  enableUptime         Boolean                 @default(true)
+  removeBgApiKey       String?
+  prefix               String                  @default("#")
+  antiSpamEnabled      Boolean                 @default(false)
+  spamLimit            Int                     @default(5)
+  spamInterval         Int                     @default(10)
+  spamDelayMin         Int                     @default(1000)
+  spamDelayMax         Int                     @default(3000)
+  welcomeMessage       String?                 @db.Text
+  autoRead             Boolean                 @default(false)
+  alwaysOnline         Boolean                 @default(false)
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime @updatedAt
+  session              session                 @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "BotConfig_sessionId_fkey")
+}
+
+model broadcastlog {
+  id                 String               @id @default(cuid())
+  sessionId          String
+  message            String               @db.Text
+  total              Int
+  sent               Int                  @default(0)
+  failed             Int                  @default(0)
+  status             String               @default("running")
+  delay              Int                  @default(2000)
+  startedAt          DateTime             @default(now())
+  completedAt        DateTime?
+  broadcastrecipient broadcastrecipient[]
+
+  @@index([sessionId], map: "BroadcastLog_sessionId_idx")
+  @@index([sessionId, startedAt], map: "BroadcastLog_sessionId_startedAt_idx")
+}
+
+model broadcastrecipient {
+  id             String       @id @default(cuid())
+  broadcastLogId String
+  jid            String
+  status         String       @default("pending")
+  error          String?      @db.Text
+  sentAt         DateTime?
+  broadcastlog   broadcastlog @relation(fields: [broadcastLogId], references: [id], onDelete: Cascade, map: "BroadcastRecipient_broadcastLogId_fkey")
+
+  @@index([broadcastLogId], map: "BroadcastRecipient_broadcastLogId_idx")
+}
+
+model chatlabel {
+  id        String   @id @default(cuid())
+  labelId   String
+  chatJid   String
+  createdAt DateTime @default(now())
+  label     label    @relation(fields: [labelId], references: [id], onDelete: Cascade, map: "ChatLabel_labelId_fkey")
+
+  @@unique([labelId, chatJid], map: "ChatLabel_labelId_chatJid_key")
+  @@index([chatJid], map: "ChatLabel_chatJid_idx")
+  @@index([labelId], map: "ChatLabel_labelId_idx")
+}
+
+model contact {
+  id           String    @id @default(cuid())
+  sessionId    String
+  jid          String
+  lid          String?
+  name         String?
+  notify       String?
+  verifiedName String?
+  remoteJidAlt String?
+  profilePic   String?   @db.Text
+  data         String?   @db.LongText
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime @updatedAt
+  session      session   @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "Contact_sessionId_fkey")
+  message      message[]
+
+  @@unique([sessionId, jid], map: "Contact_sessionId_jid_key")
+}
+
+model contactrelationship {
+  id           String   @id @default(cuid())
+  sessionId    String
+  jid          String
+  category     String   @default("FAMILY") // FAMILY, FRIEND, OFFICE, CUSTOMER, etc.
+  relationship String?  // e.g., "Younger Brother", "Manager", "Client"
+  addressAs    String?  // e.g., "Bro", "Sir", "Hi Geetha"
+  tone         String   @default("CASUAL") // CASUAL, RESPECTFUL, PROFESSIONAL, WARM, HUMOROUS
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  session      session  @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "ContactRelationship_sessionId_fkey")
+
+  @@unique([sessionId, jid], map: "ContactRelationship_sessionId_jid_key")
+}
+
+model group {
+  id              String    @id @default(cuid())
+  sessionId       String
+  jid             String
+  subject         String?
+  description     String?   @db.Text
+  ownerJid        String?
+  participants    String?   @db.LongText
+  creation        DateTime?
+  restrict        Boolean?
+  announce        Boolean?
+  metadata        String?   @db.LongText
+  inviteCode      String?
+  isCommunity     Boolean   @default(false)
+  linkedParentJid String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime @updatedAt
+  session         session   @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "Group_sessionId_fkey")
+
+  @@unique([sessionId, jid], map: "Group_sessionId_jid_key")
+}
+
+model label {
+  id        String      @id @default(cuid())
+  sessionId String
+  name      String
+  color     Int         @default(0)
+  colorHex  String      @default("#FF0000")
+  createdAt DateTime    @default(now())
+  updatedAt DateTime @updatedAt
+  chatlabel chatlabel[]
+
+  @@unique([sessionId, name], map: "Label_sessionId_name_key")
+  @@index([sessionId], map: "Label_sessionId_idx")
+}
+
+model message {
+  id        String         @id @default(cuid())
+  sessionId String
+  remoteJid String
+  senderJid String?
+  fromMe    Boolean
+  keyId     String
+  pushName  String?
+  type      message_type   @default(TEXT)
+  content   String?        @db.Text
+  mediaUrl  String?        @db.Text
+  status    message_status @default(PENDING)
+  timestamp DateTime       @default(now())
+  quoteId   String?
+  contactId String?
+  contact   contact?       @relation(fields: [contactId], references: [id], map: "Message_contactId_fkey")
+  session   session        @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "Message_sessionId_fkey")
+
+  @@unique([sessionId, keyId], map: "Message_sessionId_keyId_key")
+  @@index([contactId], map: "Message_contactId_fkey")
+  @@index([sessionId, remoteJid], map: "Message_sessionId_remoteJid_idx")
+  @@index([sessionId, remoteJid, timestamp], map: "Message_sessionId_remoteJid_timestamp_idx")
+}
+
+model notification {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  message   String   @db.Text
+  type      String   @default("INFO")
+  read      Boolean  @default(false)
+  href      String?
+  createdAt DateTime @default(now())
+  user      user     @relation(fields: [userId], references: [id], onDelete: Cascade, map: "Notification_userId_fkey")
+
+  @@index([userId], map: "Notification_userId_fkey")
+}
+
+model scheduledmessage {
+  id             String   @id @default(cuid())
+  sessionId      String
+  jid            String
+  content        String?  @db.Text
+  mediaUrl       String?
+  mediaType      String?
+  sendAt         DateTime
+  cronExpression String?
+  recurrenceRule String?  @db.Text
+  status         String   @default("PENDING")
+  createdAt      DateTime @default(now())
+  mentions       String?  @db.LongText
+  session        session  @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "ScheduledMessage_sessionId_fkey")
+  runs           scheduledmessagerun[]
+
+  @@index([sessionId], map: "ScheduledMessage_sessionId_fkey")
+}
+
+model scheduledmessagerun {
+  id            String   @id @default(cuid())
+  sessionId     String
+  scheduleId    String?
+  jid           String
+  recipientName String?
+  content       String?  @db.Text
+  mediaUrl      String?
+  mediaType     String?
+  plannedAt     DateTime
+  processedAt   DateTime @default(now())
+  status        String
+  messageKeyId  String?
+  error         String?  @db.Text
+  session       session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  schedule      scheduledmessage? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+
+  @@unique([sessionId, messageKeyId])
+  @@index([sessionId, processedAt])
+  @@index([scheduleId, processedAt])
+}
+
+model session {
+  id               String             @id @default(cuid())
+  userId           String
+  name             String
+  sessionId        String             @unique(map: "Session_sessionId_key")
+  status           String             @default("DISCONNECTED")
+  qr               String?            @db.Text
+  config           String?            @db.LongText
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime @updatedAt
+  aichatconfig     aichatconfig?
+  aiconversation   aiconversation[]
+  airequirement    airequirement[]
+  autoreply        autoreply[]
+  botconfig        botconfig?
+  contact          contact[]
+  group            group[]
+  message          message[]
+  scheduledmessage scheduledmessage[]
+  scheduledmessagerun scheduledmessagerun[]
+  contactrelationship contactrelationship[]
+  user             user               @relation(fields: [userId], references: [id], onDelete: Cascade, map: "Session_userId_fkey")
+  sessionaccess    sessionaccess[]
+  story            story[]
+  webhook          webhook[]
+
+  @@index([userId], map: "Session_userId_fkey")
+}
+
+model sessionaccess {
+  id        String   @id @default(cuid())
+  sessionId String
+  userId    String
+  createdAt DateTime @default(now())
+  session   session  @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "SessionAccess_sessionId_fkey")
+  user      user     @relation(fields: [userId], references: [id], onDelete: Cascade, map: "SessionAccess_userId_fkey")
+
+  @@unique([sessionId, userId], map: "SessionAccess_sessionId_userId_key")
+  @@index([sessionId], map: "SessionAccess_sessionId_idx")
+  @@index([userId], map: "SessionAccess_userId_idx")
+}
+
+model story {
+  id        String   @id @default(cuid())
+  sessionId String
+  jid       String
+  content   String?  @db.Text
+  mediaUrl  String?  @db.Text
+  type      String
+  timestamp DateTime @default(now())
+  viewed    Boolean  @default(false)
+  session   session  @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "Story_sessionId_fkey")
+
+  @@index([sessionId], map: "Story_sessionId_fkey")
+}
+
+model systemconfig {
+  id                 String   @id @default("default")
+  appName            String   @default("WA-AKG")
+  logoUrl            String?
+  faviconUrl         String?
+  timezone           String   @default("Asia/Jakarta")
+  enableRegistration Boolean  @default(true)
+  updatedAt          DateTime @updatedAt
+}
+
+model user {
+  id            String          @id @default(cuid())
+  name          String?
+  email         String          @unique(map: "User_email_key")
+  password      String
+  role          user_role       @default(OWNER)
+  apiKey        String?         @unique(map: "User_apiKey_key")
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime @updatedAt
+  notification  notification[]
+  session       session[]
+  sessionaccess sessionaccess[]
+  webhook       webhook[]
+}
+
+model webhook {
+  id         String       @id @default(cuid())
+  userId     String
+  sessionId  String?
+  name       String
+  url        String
+  secret     String?
+  events     String       @db.LongText
+  isActive   Boolean      @default(true)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime @updatedAt
+  session    session?     @relation(fields: [sessionId], references: [id], onDelete: Cascade, map: "Webhook_sessionId_fkey")
+  user       user         @relation(fields: [userId], references: [id], onDelete: Cascade, map: "Webhook_userId_fkey")
+  webhooklog webhooklog[]
+
+  @@index([sessionId], map: "Webhook_sessionId_fkey")
+  @@index([userId], map: "Webhook_userId_fkey")
+}
+
+model webhooklog {
+  id                 String   @id @default(cuid())
+  webhookId          String
+  event              String
+  status             String
+  requestUrl         String   @db.Text
+  requestHeaders     String?  @db.LongText
+  requestBody        String?  @db.LongText
+  responseStatusCode Int?
+  responseBody       String?  @db.Text
+  responseTimeMs     Int?
+  errorMessage       String?  @db.Text
+  createdAt          DateTime @default(now())
+  webhook            webhook  @relation(fields: [webhookId], references: [id], onDelete: Cascade, map: "WebhookLog_webhookId_fkey")
+
+  @@index([webhookId, createdAt], map: "WebhookLog_webhookId_createdAt_idx")
+  @@index([webhookId], map: "WebhookLog_webhookId_idx")
+}
+
+enum botconfig_botMode {
+  ALL
+  OWNER
+  SPECIFIC
+  BLACKLIST
+}
+
+enum user_role {
+  SUPERADMIN
+  OWNER
+  STAFF
+}
+
+enum botconfig_autoReplyMode {
+  ALL
+  OWNER
+  SPECIFIC
+  BLACKLIST
+}
+
+enum message_type {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT
+  STICKER
+  LOCATION
+  CONTACT
+}
+
+enum message_status {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
